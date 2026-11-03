@@ -6,8 +6,50 @@ Feito com **TypeScript, Hono, Cloudflare Workers e D1**. Você pode instalar o a
 
 Cada instalação usa contas, banco e credenciais próprios. O repositório não inclui acesso à instalação do autor, seguidores, senhas ou tokens.
 
+## Comece aqui (não precisa saber programar)
+
+**O que ele faz, em uma frase:** alguém comenta uma palavra no seu post (por exemplo, `quero`) e o AutoDM responde o comentário e manda o link no direct da pessoa, sozinho, 24 horas por dia. É a mesma ideia do ManyChat, só que roda na **sua** conta gratuita da Cloudflare e você não paga mensalidade.
+
+**Você vai precisar de:**
+
+1. Uma conta **profissional** (Criador de conteúdo ou Empresa) no Instagram. Dá para mudar em *Configurações → Tipo de conta*.
+2. Uma conta grátis na [Cloudflare](https://dash.cloudflare.com/sign-up). É onde o AutoDM vai ficar ligado sem precisar do seu computador.
+3. Uma conta grátis no [Meta for Developers](https://developers.facebook.com/) (entra com o seu Facebook). É o que permite ao AutoDM responder no Instagram.
+4. Um agente de IA que mexe no seu computador, como o [Claude Code](https://claude.com/claude-code). Ele faz a parte técnica por você.
+
+**Quanto tempo leva:** de 30 a 60 minutos na primeira vez. A parte mais demorada é a configuração do app na Meta, porque é feita por você no site deles. O agente explica cada tela.
+
+### Copie e cole no seu agente
+
+Abra o terminal, rode o Claude Code (ou o agente que você usa) e cole o texto abaixo:
+
+```text
+Quero instalar o AutoDM (https://github.com/raphaelbusquet/autodm) na minha conta, do zero.
+Eu não sou programador: me guie em português, um passo de cada vez, e espere eu confirmar antes de seguir.
+
+1. Confira se tenho Git e Node.js 22.12+ instalados. Se faltar algo, me diga como instalar no meu sistema.
+2. Clone o repositório numa pasta chamada autodm, rode npm ci e leia o README.md e o AGENTS.md inteiros antes de continuar.
+3. Primeiro teste no meu computador: crie o .dev.vars, me peça para escolher uma senha do painel (eu mesmo digito no arquivo,
+   não quero a senha no chat), rode as migrações locais e abra o painel em http://localhost:8787/admin para eu ver funcionando.
+4. Depois, publique na MINHA conta Cloudflare seguindo a seção "Publicação na Cloudflare" do README:
+   wrangler login (eu faço o login no navegador), criar o banco D1, copiar wrangler.example.jsonc para wrangler.jsonc com o ID do meu banco
+   e o meu e-mail de contato, aplicar as migrações remotas, cadastrar os segredos com wrangler secret put (eu digito os valores)
+   e fazer o deploy. Me mostre a URL do painel no final.
+5. Me guie na seção "Conectar o Instagram": me diga exatamente onde clicar no Meta for Developers, quais URLs colar
+   (callback e webhook da minha instalação) e quais permissões ativar. Não invente telas: se algo estiver diferente, me peça um print.
+6. Ao final, me ajude a criar a primeira automação no painel e a testar com um comentário novo vindo de outra conta.
+
+Regras: nunca mostre senhas ou tokens no chat, nunca faça commit de wrangler.jsonc, .dev.vars ou .env,
+e não use nenhum recurso, conta ou ID do autor do repositório: tudo deve ser meu.
+```
+
+O agente vai pedir que você faça os logins e aprove as permissões. Essa parte é sempre sua, por segurança.
+
+> **Importante:** no começo, o app da Meta fica em "modo de desenvolvimento" e só responde contas que você cadastrar como testadoras. Para responder qualquer pessoa, a Meta pode pedir revisão do app. Veja [docs/APP_REVIEW.md](docs/APP_REVIEW.md). O resto deste README é o guia técnico completo, que o agente usa como referência.
+
 ## Índice
 
+- [Comece aqui (não precisa saber programar)](#comece-aqui-não-precisa-saber-programar)
 - [Recursos e limites](#recursos-e-limites)
 - [Instalação local](#instalação-local)
 - [Publicação na Cloudflare](#publicação-na-cloudflare)
