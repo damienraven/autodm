@@ -1,4 +1,5 @@
 import { claim, getRule, getSetting, listRules, logEvent, recentlyTriggered, setSettings, touchContact } from './db';
+import type { EventInput } from './db';
 import { fill, findRule, pick } from './match';
 import type { Env, Rule } from './types';
 import { errorMessage, fetchJson } from './util';
@@ -200,6 +201,18 @@ const isRetryable = (err: unknown) => isThreadLocked(err) || isRateLimited(err);
 
 type PendingKind = 'dm' | 'reply' | 'link' | 'followup';
 
+/** Expired queue entries must be discarded before calling the messaging API. */
+async function discardExpiredPending(
+  env: Env,
+  pending: { id: number; expires_at: number },
+  event: Omit<EventInput, 'type'>,
+): Promise<boolean> {
+  if (Math.floor(Date.now() / 1000) < pending.expires_at) return false;
+  await env.DB.prepare('DELETE FROM pending_sends WHERE id = ?').bind(pending.id).run();
+  await logEvent(env, { ...event, type: 'gave_up', detail: 'prazo de envio expirado' });
+  return true;
+}
+
 async function enqueue(
   env: Env,
   kind: PendingKind,
@@ -236,6 +249,7 @@ export async function retryOne(env: Env, id: number): Promise<void> {
   }>();
   if (!p) return;
   const ev = { ruleId: p.rule_id, platform: 'instagram' as const, userId: p.user_id, username: p.username, ref: p.ref };
+  if (await discardExpiredPending(env, p, ev)) return;
   const recipient = JSON.parse(p.recipient) as Recipient;
   if (p.kind === 'link') return sendScheduledLink(env, p);
   if (p.kind === 'followup') return sendFollowup(env, p);
@@ -249,7 +263,8 @@ export async function retryOne(env: Env, id: number): Promise<void> {
     }
     await env.DB.prepare('DELETE FROM pending_sends WHERE id = ?').bind(p.id).run();
   } catch (err) {
-    if (!isRetryable(err) || Math.floor(Date.now() / 1000) >= p.expires_at) {
+    if (await discardExpiredPending(env, p, ev)) return;
+    if (!isRetryable(err)) {
       await env.DB.prepare('DELETE FROM pending_sends WHERE id = ?').bind(p.id).run();
       await logEvent(env, { ...ev, type: 'gave_up', detail: errorMessage(err) });
     } else {
@@ -471,15 +486,12 @@ async function scheduleFollowup(env: Env, sourceRuleId: number, userId: string, 
 async function sendFollowup(env: Env, p: { id: number; user_id: string; username: string; expires_at: number }) {
   const ev = { platform: 'instagram' as const, userId: p.user_id, username: p.username };
   const done = () => env.DB.prepare('DELETE FROM pending_sends WHERE id = ?').bind(p.id).run();
-  const expired = Math.floor(Date.now() / 1000) >= p.expires_at;
   const w = await getWelcome(env);
   if (w.welcome_active !== '1' || !w.welcome_text.trim()) return void (await done());
   try {
     const result = await checkFollow(env, undefined, p.user_id);
-    if (!result) {
-      if (expired) { await done(); await logEvent(env, { ...ev, type: 'gave_up', detail: 'follow check (boas-vindas)' }); }
-      return;
-    }
+    if (await discardExpiredPending(env, p, ev)) return;
+    if (!result) return;
     if (!result.follows) {
       await done();
       await logEvent(env, { ...ev, type: 'welcome_skipped', detail: 'deixou de seguir' });
@@ -487,11 +499,13 @@ async function sendFollowup(env: Env, p: { id: number; user_id: string; username
     }
     const text = fill(w.welcome_text, { username: result.username, name: result.name });
     const url = await resolveLink(env, w.welcome_link, p.user_id);
+    if (await discardExpiredPending(env, p, ev)) return;
     await send(env, { id: p.user_id }, buttons(text, [{ type: 'web_url', url, title: (w.welcome_button || 'Abrir link').slice(0, 20) }]));
     await done();
     await logEvent(env, { ...ev, type: 'welcome_sent' });
   } catch (err) {
-    if (!isRetryable(err) || expired) {
+    if (await discardExpiredPending(env, p, ev)) return;
+    if (!isRetryable(err)) {
       await done();
       await logEvent(env, { ...ev, type: 'gave_up', detail: errorMessage(err) });
     }
@@ -501,14 +515,13 @@ async function sendFollowup(env: Env, p: { id: number; user_id: string; username
 async function sendScheduledLink(env: Env, p: { id: number; rule_id: number; user_id: string; username: string; expires_at: number }) {
   const ev = { ruleId: p.rule_id, platform: 'instagram' as const, userId: p.user_id, username: p.username };
   const done = () => env.DB.prepare('DELETE FROM pending_sends WHERE id = ?').bind(p.id).run();
-  const expired = Math.floor(Date.now() / 1000) >= p.expires_at;
   const rule = await getRule(env, p.rule_id);
   if (!rule) return void (await done());
   try {
     const result = await checkFollow(env, rule.id, p.user_id);
+    if (await discardExpiredPending(env, p, ev)) return;
     if (!result) {
       // Meta didn't answer; the cron picks it up again in a few minutes.
-      if (expired) { await done(); await logEvent(env, { ...ev, type: 'gave_up', detail: 'follow check' }); }
       return;
     }
     if (!result.follows) {
@@ -518,12 +531,14 @@ async function sendScheduledLink(env: Env, p: { id: number; rule_id: number; use
       return;
     }
     const msg = await linkMessage(env, rule, p.user_id, result.username, result.name);
+    if (await discardExpiredPending(env, p, ev)) return;
     if (msg) await send(env, { id: p.user_id }, msg);
     await done();
     await logEvent(env, { ...ev, type: 'link_sent' });
     if (rule.require_follow) await scheduleFollowup(env, rule.id, p.user_id, result.username);
   } catch (err) {
-    if (!isRetryable(err) || expired) {
+    if (await discardExpiredPending(env, p, ev)) return;
+    if (!isRetryable(err)) {
       await done();
       await logEvent(env, { ...ev, type: 'gave_up', detail: errorMessage(err) });
     }
