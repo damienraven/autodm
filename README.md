@@ -296,7 +296,7 @@ npx wrangler tail --config wrangler.jsonc
 npx wrangler secret list --config wrangler.jsonc
 ```
 
-Os testes existentes cobrem matcher e preenchimento de variáveis. Para executá-los por sua iniciativa:
+Os testes existentes cobrem matcher, preenchimento de variáveis e descarte de itens vencidos da fila (incluindo vencimento durante consultas de follow e oferta). As chamadas de rede nesses testes são simuladas. Para executá-los por sua iniciativa:
 
 ```bash
 npm test
