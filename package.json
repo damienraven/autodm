@@ -3,7 +3,9 @@
   "private": true,
   "type": "module",
   "description": "Automações de comentários e mensagens com Cloudflare Workers e D1.",
-  "engines": { "node": ">=22.12.0" },
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "dev": "wrangler dev --config wrangler.local.jsonc",
     "deploy": "wrangler deploy --config wrangler.jsonc",
@@ -17,6 +19,7 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261006.1",
+    "@types/node": "^24.19.2",
     "typescript": "^7.0.2",
     "vitest": "^5.0.3",
     "wrangler": "^4.147.0"

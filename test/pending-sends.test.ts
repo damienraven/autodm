@@ -28,6 +28,7 @@ function fixture(kind: Kind, expiresAt: number) {
       const stmt = {
         bind(...args: unknown[]) { values = args; return stmt; },
         async first() {
+          if (sql.startsWith('INSERT INTO security_buckets')) return { used: 1 };
           if (sql.startsWith('SELECT * FROM pending_sends')) return pending;
           if (sql.startsWith('SELECT value FROM settings')) {
             const value = settings[String(values[0])];
@@ -41,7 +42,7 @@ function fixture(kind: Kind, expiresAt: number) {
       return stmt;
     },
   };
-  const env = { DB: db } as unknown as Env;
+  const env = { DB: db, SEND_MODE: 'test', TEST_IG_USER_IDS: 'user-test' } as unknown as Env;
   const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => Response.json({
     id: 'sent-test', name: 'Teste', username: 'teste', is_user_follow_business: true,
   }));
@@ -62,6 +63,15 @@ afterEach(() => {
 });
 
 describe.each(kinds)('pending %s expiry', (kind) => {
+  it('discards queued sends when the automation is paused', async () => {
+    const f = fixture(kind, NOW + 60);
+    f.rule.active = 0;
+    f.settings.welcome_active = '0';
+    await retryOne(f.env, f.pending.id);
+    expect(f.fetchMock).not.toHaveBeenCalled();
+    expect(f.deletes()).toHaveLength(1);
+    expect(f.expiredEvent()?.values[6]).toBe('automação pausada ou removida');
+  });
   it.each([NOW - 1, NOW, 0])('discards deadline %s without any network calls', async (deadline) => {
     const f = fixture(kind, deadline);
     await retryOne(f.env, f.pending.id);
@@ -75,12 +85,33 @@ describe.each(kinds)('pending %s expiry', (kind) => {
     const f = fixture(kind, NOW + 60);
     await retryOne(f.env, f.pending.id);
     expect(f.fetchMock.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+    expect(f.fetchMock.mock.calls.every(([url]) => !new URL(url).searchParams.has('access_token'))).toBe(true);
+    expect(f.fetchMock.mock.calls.every(([, init]) => (init?.headers as Record<string, string>)?.Authorization === 'Bearer fake-token-for-tests')).toBe(true);
     expect(f.deletes()).toHaveLength(1);
     expect(f.expiredEvent()).toBeUndefined();
   });
 });
 
 describe.each(['link', 'followup'] as const)('delayed %s expiry', (kind) => {
+  it('rechecks pause after a slow offer lookup', async () => {
+    const f = fixture(kind, NOW + 60);
+    f.rule.link_url = '{oferta_ebook}';
+    f.settings.welcome_link = '{oferta_ebook}';
+    f.env.EBOOK_OFFER_URL = 'https://example.com/offer';
+    f.env.EBOOK_OFFER_TOKEN = 'fake-offer-token-for-tests';
+    f.fetchMock.mockImplementation(async (url) => {
+      if (url === f.env.EBOOK_OFFER_URL) {
+        f.rule.active = 0;
+        f.settings.welcome_active = '0';
+        return Response.json({ url: 'https://example.com/guia' });
+      }
+      return Response.json({ is_user_follow_business: true, username: 'teste' });
+    });
+    await retryOne(f.env, f.pending.id);
+    expect(f.fetchMock.mock.calls.some(([url]) => new URL(url).pathname.endsWith('/messages'))).toBe(false);
+    expect(f.deletes()).toHaveLength(1);
+    expect(f.expiredEvent()?.values[6]).toBe('automação pausada ou removida');
+  });
   it.each([true, false])('does not send after a slow follow lookup (following=%s)', async (follows) => {
     const f = fixture(kind, NOW + 1);
     f.fetchMock.mockImplementation(async () => {

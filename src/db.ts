@@ -1,4 +1,5 @@
 import type { Env, Platform, Rule } from './types';
+import { isOAuthToken, protectToken, revealToken } from './token-storage';
 
 const JSON_FIELDS = ['media_ids', 'keywords', 'public_replies'] as const;
 const BOOL_FIELDS = ['require_follow', 'active'] as const;
@@ -55,14 +56,16 @@ export async function deleteRule(env: Env, id: number): Promise<void> {
 
 export async function getSetting(env: Env, key: string): Promise<string | undefined> {
   const row = await env.DB.prepare('SELECT value FROM settings WHERE key = ?').bind(key).first<{ value: string }>();
-  return row?.value;
+  return row && isOAuthToken(key) ? revealToken(env.TOKEN_ENCRYPTION_KEY, key, row.value) : row?.value;
 }
 
 export async function setSettings(env: Env, values: Record<string, string>): Promise<void> {
   const stmt = env.DB.prepare(
     'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
   );
-  await env.DB.batch(Object.entries(values).map(([k, v]) => stmt.bind(k, v)));
+  const entries = await Promise.all(Object.entries(values).map(async ([k, v]) =>
+    [k, isOAuthToken(k) && v ? await protectToken(env.TOKEN_ENCRYPTION_KEY, k, v) : v] as const));
+  await env.DB.batch(entries.map(([k, v]) => stmt.bind(k, v)));
 }
 
 export async function deleteSettings(env: Env, prefix: string): Promise<void> {
@@ -110,6 +113,7 @@ export async function recentlyTriggered(env: Env, ruleId: number, userId: string
 
 export async function cleanup(env: Env): Promise<void> {
   await env.DB.batch([
+    env.DB.prepare('DELETE FROM security_buckets WHERE expires_at < unixepoch()'),
     env.DB.prepare('DELETE FROM processed WHERE created_at < unixepoch() - 30 * 86400'),
     env.DB.prepare('DELETE FROM pending_sends WHERE expires_at > 0 AND expires_at < unixepoch() - 86400'),
     env.DB.prepare('DELETE FROM events WHERE created_at < unixepoch() - 180 * 86400'),

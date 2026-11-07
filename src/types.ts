@@ -1,6 +1,9 @@
 export interface Env {
   DB: D1Database;
   ADMIN_PASSWORD: string;
+  TOKEN_ENCRYPTION_KEY?: string;
+  SEND_MODE?: 'disabled' | 'test' | 'public';
+  TEST_IG_USER_IDS?: string;
   IG_APP_ID: string;
   IG_APP_SECRET: string;
   // Meta app secret (Configurações → Básico). Webhooks may be signed with it instead of the Instagram app secret.

@@ -3,6 +3,7 @@ import type { EventInput } from './db';
 import { fill, findRule, pick } from './match';
 import type { Env, Rule } from './types';
 import { errorMessage, fetchJson } from './util';
+import { allowSend, reserve } from './limits';
 
 const GRAPH_VERSION = 'v24.0';
 const SCOPES = 'instagram_business_basic,instagram_business_manage_messages,instagram_business_manage_comments';
@@ -21,14 +22,14 @@ async function token(env: Env): Promise<string> {
 async function graph<T = any>(
   env: Env,
   path: string,
-  opts: { method?: 'GET' | 'POST'; params?: Record<string, string>; body?: unknown } = {},
+  opts: { method?: 'GET' | 'POST'; params?: Record<string, string>; body?: unknown; userId?: string } = {},
 ): Promise<T> {
+  if (opts.method === 'POST' && /\/(messages|replies)$/.test(path)) await allowSend(env, opts.userId);
   const url = new URL(`${graphBase(env)}/${GRAPH_VERSION}/${path}`);
   for (const [k, v] of Object.entries(opts.params ?? {})) url.searchParams.set(k, v);
-  url.searchParams.set('access_token', await token(env));
   return fetchJson<T>(url.toString(), {
     method: opts.method ?? 'GET',
-    headers: opts.body ? { 'content-type': 'application/json' } : undefined,
+    headers: { Authorization: `Bearer ${await token(env)}`, ...(opts.body ? { 'content-type': 'application/json' } : {}) },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
 }
@@ -131,8 +132,8 @@ function buttons(text: string, btns: Button[]) {
   return { attachment: { type: 'template', payload: { template_type: 'button', text, buttons: btns } } };
 }
 
-async function send(env: Env, recipient: Recipient, message: unknown) {
-  return graph(env, 'me/messages', { method: 'POST', body: { recipient, message } });
+async function send(env: Env, recipient: Recipient, message: unknown, userId?: string) {
+  return graph(env, 'me/messages', { method: 'POST', body: { recipient, message }, userId: userId ?? ('id' in recipient ? recipient.id : undefined) });
 }
 
 function confirmButton(rule: Rule): Button {
@@ -201,6 +202,17 @@ const isRetryable = (err: unknown) => isThreadLocked(err) || isRateLimited(err);
 
 type PendingKind = 'dm' | 'reply' | 'link' | 'followup';
 
+/** Recheck immediately before a queued send, including after slow lookups. */
+async function discardPausedPending(env: Env, p: { id: number; rule_id?: number | null; kind?: string }, event: Omit<EventInput, 'type'>): Promise<boolean> {
+  const enabled = p.kind === 'followup'
+    ? (await getWelcome(env)).welcome_active === '1'
+    : p.rule_id != null && Boolean((await getRule(env, p.rule_id))?.active);
+  if (enabled) return false;
+  await env.DB.prepare('DELETE FROM pending_sends WHERE id = ?').bind(p.id).run();
+  await logEvent(env, { ...event, type: 'gave_up', detail: 'automação pausada ou removida' });
+  return true;
+}
+
 /** Expired queue entries must be discarded before calling the messaging API. */
 async function discardExpiredPending(
   env: Env,
@@ -250,15 +262,16 @@ export async function retryOne(env: Env, id: number): Promise<void> {
   if (!p) return;
   const ev = { ruleId: p.rule_id, platform: 'instagram' as const, userId: p.user_id, username: p.username, ref: p.ref };
   if (await discardExpiredPending(env, p, ev)) return;
+  if (await discardPausedPending(env, p, ev)) return;
   const recipient = JSON.parse(p.recipient) as Recipient;
   if (p.kind === 'link') return sendScheduledLink(env, p);
   if (p.kind === 'followup') return sendFollowup(env, p);
   try {
     if (p.kind === 'reply' && 'comment_id' in recipient) {
-      await graph(env, `${recipient.comment_id}/replies`, { method: 'POST', params: { message: JSON.parse(p.message) } });
+      await graph(env, `${recipient.comment_id}/replies`, { method: 'POST', params: { message: JSON.parse(p.message) }, userId: p.user_id });
       await logEvent(env, { ...ev, type: 'public_reply', detail: 'enviada após nova tentativa' });
     } else {
-      await send(env, recipient, JSON.parse(p.message));
+      await send(env, recipient, JSON.parse(p.message), p.user_id);
       await logEvent(env, { ...ev, type: 'dm_sent', detail: 'enviada após nova tentativa' });
     }
     await env.DB.prepare('DELETE FROM pending_sends WHERE id = ?').bind(p.id).run();
@@ -298,13 +311,21 @@ async function runRule(env: Env, rule: Rule, recipient: Recipient, user: { id: s
     await logEvent(env, { ruleId: rule.id, platform: 'instagram', type: 'skipped_repeat', userId: user.id, username: user.username, ref });
     return;
   }
+  const now = Math.floor(Date.now() / 1000);
+  // A rolling reservation closes the read-then-send race between different events.
+  const repeatKey = `ig-rule:${rule.id}:${user.id}`;
+  await env.DB.prepare('DELETE FROM security_buckets WHERE id = ? AND expires_at <= ?').bind(repeatKey, now).run();
+  if (!await reserve(env, repeatKey, 1, now + 86400)) {
+    await logEvent(env, { ruleId: rule.id, platform: 'instagram', type: 'skipped_repeat', userId: user.id });
+    return;
+  }
   await logEvent(env, { ruleId: rule.id, platform: 'instagram', type: 'triggered', userId: user.id, username: user.username, ref, detail: text });
   const ev = { ruleId: rule.id, platform: 'instagram' as const, userId: user.id, username: user.username, ref };
 
   const msg = (await alreadyFollowsLink(env, rule, user.id)) ?? openingMessage(rule, user.username);
   if (msg) {
     try {
-      await send(env, recipient, msg);
+      await send(env, recipient, msg, user.id);
       await logEvent(env, { ...ev, type: 'dm_sent' });
     } catch (err) {
       if (isRetryable(err)) {
@@ -320,7 +341,7 @@ async function runRule(env: Env, rule: Rule, recipient: Recipient, user: { id: s
   if (reply && 'comment_id' in recipient) {
     const message = fill(reply, { username: user.username });
     try {
-      await graph(env, `${recipient.comment_id}/replies`, { method: 'POST', params: { message } });
+      await graph(env, `${recipient.comment_id}/replies`, { method: 'POST', params: { message }, userId: user.id });
       await logEvent(env, { ...ev, type: 'public_reply' });
     } catch (err) {
       if (isRateLimited(err)) {
@@ -483,7 +504,7 @@ async function scheduleFollowup(env: Env, sourceRuleId: number, userId: string, 
   await logEvent(env, { platform: 'instagram', type: 'welcome_scheduled', userId, username, detail: `${delay} min após a automação ${sourceRuleId}` });
 }
 
-async function sendFollowup(env: Env, p: { id: number; user_id: string; username: string; expires_at: number }) {
+async function sendFollowup(env: Env, p: { id: number; kind: string; user_id: string; username: string; expires_at: number }) {
   const ev = { platform: 'instagram' as const, userId: p.user_id, username: p.username };
   const done = () => env.DB.prepare('DELETE FROM pending_sends WHERE id = ?').bind(p.id).run();
   const w = await getWelcome(env);
@@ -500,6 +521,7 @@ async function sendFollowup(env: Env, p: { id: number; user_id: string; username
     const text = fill(w.welcome_text, { username: result.username, name: result.name });
     const url = await resolveLink(env, w.welcome_link, p.user_id);
     if (await discardExpiredPending(env, p, ev)) return;
+    if (await discardPausedPending(env, p, ev)) return;
     await send(env, { id: p.user_id }, buttons(text, [{ type: 'web_url', url, title: (w.welcome_button || 'Abrir link').slice(0, 20) }]));
     await done();
     await logEvent(env, { ...ev, type: 'welcome_sent' });
@@ -520,6 +542,7 @@ async function sendScheduledLink(env: Env, p: { id: number; rule_id: number; use
   try {
     const result = await checkFollow(env, rule.id, p.user_id);
     if (await discardExpiredPending(env, p, ev)) return;
+    if (await discardPausedPending(env, p, ev)) return;
     if (!result) {
       // Meta didn't answer; the cron picks it up again in a few minutes.
       return;
@@ -532,6 +555,7 @@ async function sendScheduledLink(env: Env, p: { id: number; rule_id: number; use
     }
     const msg = await linkMessage(env, rule, p.user_id, result.username, result.name);
     if (await discardExpiredPending(env, p, ev)) return;
+    if (await discardPausedPending(env, p, ev)) return;
     if (msg) await send(env, { id: p.user_id }, msg);
     await done();
     await logEvent(env, { ...ev, type: 'link_sent' });
@@ -562,7 +586,7 @@ async function linkAlreadySent(env: Env, ruleId: number, userId: string): Promis
 async function onButton(env: Env, userId: string, payload: string) {
   if (!payload.startsWith(BUTTON_PREFIX)) return;
   const rule = await getRule(env, Number(payload.slice(BUTTON_PREFIX.length)));
-  if (!rule) return;
+  if (!rule || !rule.active) return;
   if (await linkAlreadySent(env, rule.id, userId)) {
     await logEvent(env, { ruleId: rule.id, platform: 'instagram', type: 'button_repeat', userId });
     return;

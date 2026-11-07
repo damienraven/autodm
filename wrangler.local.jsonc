@@ -16,5 +16,5 @@
       "migrations_dir": "migrations"
     }
   ],
-  "vars": { "CONTACT_EMAIL": "you@example.com" }
+  "vars": { "CONTACT_EMAIL": "you@example.com", "SEND_MODE": "disabled", "TEST_IG_USER_IDS": "" }
 }

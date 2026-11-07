@@ -1,6 +1,7 @@
 # Local development only. Fill values in the ignored .dev.vars file.
 # Production: npx wrangler secret put NAME --config wrangler.jsonc
 ADMIN_PASSWORD=
+TOKEN_ENCRYPTION_KEY=
 IG_APP_ID=
 IG_APP_SECRET=
 META_APP_SECRET=

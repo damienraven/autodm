@@ -22,7 +22,7 @@
       "migrations_dir": "migrations"
     }
   ],
-  "vars": { "CONTACT_EMAIL": "you@example.com" }
+  "vars": { "CONTACT_EMAIL": "you@example.com", "SEND_MODE": "disabled", "TEST_IG_USER_IDS": "" }
   // Secrets: ADMIN_PASSWORD, IG_APP_ID, IG_APP_SECRET, META_APP_SECRET,
   // IG_VERIFY_TOKEN, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET.
   // Optional ebook integration: see README.

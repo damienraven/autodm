@@ -10,6 +10,8 @@ import { findRule } from './match';
 import type { Env, Rule } from './types';
 import { dispatch, TASK_PATH, verifyTask, type Task } from './tasks';
 import { errorMessage, hmacSha256Hex, randomToken, safeEqual } from './util';
+import { createSession, SESSION_SECONDS, validSession } from './session';
+import { allowLogin } from './limits';
 import * as yt from './youtube';
 
 const app = new Hono<{ Bindings: Env }>();
@@ -108,17 +110,16 @@ app.get('/:file{(apple-touch-icon|icon-192|icon-512)\\.png}', (c) => {
 // ---------- Login: cookie session so the panel works as a Home Screen app on iPhone ----------
 
 const SESSION_COOKIE = 'autodm_session';
-const SESSION_DAYS = 365;
-// Derived from the password: changing ADMIN_PASSWORD signs every device out.
-const sessionValue = (env: Env) => hmacSha256Hex(env.ADMIN_PASSWORD, 'autodm-session-v1');
 
 app.get('/login', (c) => c.html(loginPage()));
 app.post('/login', async (c) => {
+  if (!c.env.ADMIN_PASSWORD) return c.text('ADMIN_PASSWORD não configurada', 500);
+  if (!await allowLogin(c.env, c.req.header('cf-connecting-ip') ?? 'local')) return c.text('Muitas tentativas. Aguarde até 15 minutos.', 429);
   const form = await c.req.parseBody();
   const password = typeof form.password === 'string' ? form.password : '';
   if (!c.env.ADMIN_PASSWORD || !safeEqual(password, c.env.ADMIN_PASSWORD)) return c.html(loginPage(true), 401);
-  setCookie(c, SESSION_COOKIE, await sessionValue(c.env), {
-    httpOnly: true, secure: true, sameSite: 'Lax', path: '/', maxAge: SESSION_DAYS * 86400,
+  setCookie(c, SESSION_COOKIE, await createSession(c.env.ADMIN_PASSWORD), {
+    httpOnly: true, secure: true, sameSite: 'Lax', path: '/', maxAge: SESSION_SECONDS,
   });
   return c.redirect('/admin');
 });
@@ -132,12 +133,15 @@ app.get('/favicon.ico', (c) => c.redirect('/favicon.svg', 301));
 app.get('/privacy', (c) =>
   c.html(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><link rel="icon" href="/favicon.svg" type="image/svg+xml"><title>Política de Privacidade</title>
 <body style="font:16px/1.6 system-ui;max-width:680px;margin:40px auto;padding:0 16px">
-<h1>Política de Privacidade</h1>
-<p>Este aplicativo automatiza respostas a comentários e mensagens nas contas do próprio operador no Instagram e no YouTube.</p>
-<p><b>Dados tratados:</b> ID e nome de usuário de quem comenta ou envia mensagem, texto do comentário/mensagem e se a pessoa segue a conta. Usados apenas para enviar a resposta solicitada e gerar métricas internas.</p>
-<p><b>Compartilhamento:</b> nenhum dado é vendido ou compartilhado com terceiros.</p>
-<p><b>Retenção:</b> registros de eventos são apagados após 180 dias.</p>
-<p><b>Exclusão de dados:</b> envie um e-mail para <a href="mailto:${c.env.CONTACT_EMAIL}">${c.env.CONTACT_EMAIL}</a> com seu nome de usuário e todos os seus dados serão removidos em até 30 dias.</p>
+<h1>Política de Privacidade — Dragon 3D</h1>
+<p>Atualizada em 6 de novembro de 2026. A Dragon 3D opera este aplicativo para entregar materiais solicitados no Instagram e encaminhar interessados ao atendimento. O piloto usa apenas pessoas e publicações previamente autorizadas.</p>
+<p><b>Dados tratados:</b> identificadores do Instagram, nome de usuário e nome quando disponibilizado, texto da interação, referência da publicação, horários, respostas e registros de entrega ou erro. A informação de follow só é consultada quando necessária a um recurso habilitado; esse recurso está desativado no piloto.</p>
+<p><b>Finalidades:</b> responder à solicitação feita por comentário ou mensagem, evitar respostas repetidas, diagnosticar falhas e acompanhar métricas internas. Uma interação não cadastra a pessoa automaticamente em campanhas adicionais.</p>
+<p><b>Prestadores:</b> a Meta processa as interações no Instagram; a Cloudflare hospeda o aplicativo e o banco. Esses provedores podem tratar dados em outros países conforme suas políticas. Dados não são vendidos. Ao abrir o link de um material ou atendimento, também se aplica a política do destino.</p>
+<p><b>Retenção:</b> a rotina automática remove eventos após 180 dias, identificadores de deduplicação após 30 dias e itens vencidos da fila após o período técnico de limpeza. Contatos e configurações não têm exclusão automática: são revisados pelo operador e removidos quando deixam de ser necessários ou mediante solicitação. Backups privados podem conter dados até sua substituição, em até 30 dias; a exclusão deve ser reaplicada antes de uma restauração.</p>
+<p><b>Segurança:</b> o painel exige autenticação; novos tokens de acesso são protegidos com chave separada do banco. O acesso operacional e os backups são restritos ao responsável. Nenhum sistema oferece garantia absoluta de segurança.</p>
+<p><b>Acesso ao painel:</b> usamos cookie essencial de sessão com duração de duas horas e um identificador derivado do endereço de rede para limitar tentativas de login por janelas de 15 minutos. Os contadores vencidos são removidos pela rotina periódica. A infraestrutura de hospedagem também pode manter registros técnicos conforme sua própria política.</p>
+<p><b>Seus direitos e exclusão:</b> solicite acesso, correção, informações ou exclusão em <a href="mailto:${c.env.CONTACT_EMAIL}">${c.env.CONTACT_EMAIL}</a>, indicando seu usuário e a conta com a qual interagiu. Não envie senha ou token. O operador poderá confirmar a identidade de forma proporcional e responderá em até 15 dias, informando o andamento e eventuais obrigações de retenção. Pedidos de exclusão são executados manualmente pelo operador, incluindo contatos, eventos, fila e registros associados.</p>
 </body>`),
 );
 
@@ -147,9 +151,12 @@ const admin = new Hono<{ Bindings: Env }>();
 admin.use('*', async (c, next) => {
   if (!c.env.ADMIN_PASSWORD) return c.text('ADMIN_PASSWORD não configurada', 500);
   const cookie = getCookie(c, SESSION_COOKIE);
-  if (cookie && safeEqual(cookie, await sessionValue(c.env))) return next();
+  if (cookie && await validSession(c.env.ADMIN_PASSWORD, cookie)) return next();
   // Basic auth still works for scripts (curl -u admin:...).
-  if (c.req.header('authorization')) return basicAuth({ username: 'admin', password: c.env.ADMIN_PASSWORD })(c, next);
+  if (c.req.header('authorization')) {
+    if (!await allowLogin(c.env, c.req.header('cf-connecting-ip') ?? 'local')) return c.text('Muitas tentativas. Aguarde até 15 minutos.', 429);
+    return basicAuth({ username: 'admin', password: c.env.ADMIN_PASSWORD })(c, next);
+  }
   if (c.req.path.startsWith('/api/')) return c.json({ error: 'Sessão expirada' }, 401);
   return c.redirect('/login');
 });
